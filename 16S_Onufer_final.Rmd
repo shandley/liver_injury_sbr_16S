@@ -1,0 +1,631 @@
+---
+title: "16S_Onufer"
+author: "Anne M. Paredes"
+date: '`r format(Sys.Date(), "%B %d, %Y")`'
+output: html_document
+
+---
+##This is a study of the effects of small bowel resection on the microbiome of a group of 129j mice.  Emily Onufer performed small bowel resection (sbr), where 50% of the small intestine was removed, or sham surgery, where no bowel is removed, on these mice and took stool samples at days 3, 7, 35, 70 post-surgery. The stool samples were then 16s amplicon sequenced. 
+
+I removed sample "238_Week 5" (in 'week 5 129j sham' group) from mapping file before this analysis since the sequencing failed. I will also remove the "244_Week 5" sample from the 'Week_5 129j sham' group as the sample has <1000 reads.
+
+
+```{r load-libraries}
+library(tidyverse); packageVersion("tidyverse")
+library(phyloseq); packageVersion("phyloseq")
+library(ggpubr); packageVersion("ggpubr")
+library(vegan); packageVersion("vegan")
+library(data.table); packageVersion("data.table")
+library(DESeq2); packageVersion("DESeq2")
+
+
+```
+
+#Set knitr options
+#This chunk defines output figure dimensions
+#specifies a path where knitted figures will reside after knitting
+#and prevents display of warnings in the knitted report
+```{r global-options}
+
+knitr::opts_chunk$set(fig.width=8,
+                      fig.height = 6,
+                      fig.path = "../figures/",
+                      dev='png',
+                      warning=FALSE,
+                      message = FALSE)
+
+theme_set(theme_bw(base_size = 12))
+```
+
+#read in the RDS file from DADA2 whcih contains the OTU table, tree, taxonomy
+```{r initiate-data}
+ps0 <- readRDS("~/Desktop/Jocelyn/data/ps0.RDS")
+ps0
+
+#read in your mapping file and name it "map"
+#merge the ps0 and your mapping file "map"
+#do a sanity check by looking at ps0
+map <- import_qiime_sample_data("~/Desktop/Jocelyn/data/Onufer_mapping_FINAL.txt")
+dim(map) #63 samples and 16 sample variables
+ps0 <- merge_phyloseq(ps0, map)
+ps0
+ntaxa(ps0) #546 taxa
+
+sample_variables(ps0) #Display variables from the mapping file
+ntaxa(ps0) #Total number of taxa in the entire data
+rank_names(ps0) #Taxonomic ranks
+get_taxa_unique(ps0, "Phylum") #Unique phylum names in the file
+
+#take a peek at the metadata. Can do that for all of the sample variables
+table(sample_data(ps0)$sample_id); class(sample_data(ps0)$sample_id)
+table(sample_data(ps0)$treatment_sbr_sham); class(sample_data(ps0)$treatment_sbr_sham)
+table(sample_data(ps0)$days); class(sample_data(ps0)$days)
+table(sample_data(ps0)$sample_type); class(sample_data(ps0)$sample_type)
+table(sample_data(ps0)$strain); class(sample_data(ps0)$strain)
+table(sample_data(ps0)$sample_name); class(sample_data(ps0)$sample_name)
+table(sample_data(ps0)$mouse_number); class(sample_data(ps0)$mouse_number)
+table(sample_data(ps0)$sample_name_external_id); class(sample_data(ps0)$sample_name_external_id)
+table(sample_data(ps0)$alive_dead); class(sample_data(ps0)$alive_dead)
+table(sample_data(ps0)$adapted); class(sample_data(ps0)$adapted)
+table(sample_data(ps0)$final_cage); class(sample_data(ps0)$final_cage)
+table(sample_data(ps0)$initial_cage); class(sample_data(ps0)$initial_cage)
+
+```
+
+##Factor reordering and renaming
+```{r factor-adjustments}
+
+# Make integers factors where appropriate. All of the variables are factors here so I don't need to do this.
+
+# Reorder Time points (days)
+levels(sample_data(ps0)$days)
+sample_data(ps0)$days <- factor(sample_data(ps0)$days, levels = c("Day 3", "Day 7", "Day 35", "Day 70", "water"))
+levels(sample_data(ps0)$days)
+
+```
+
+```{r sample-removal-identification}
+
+# Basic summary statistics
+summary(sample_sums(ps0))
+
+#Format a data table to combine sample summary data with sample variable data
+ss <- as_tibble(sample_sums(ps0))
+sd <- as_tibble(sample_data(ps0))
+
+ss.df <- as_tibble(merge (sd, ss, by = "row.names"))
+ss.df <- merge(sd, data.frame("ASV" = ss), by = "row.names")
+
+# Plot the data by the diagnosis variable
+#x = "diagnosis" # Set the x-axis variable you want to examine
+
+y = 1000  # Set a threshold for the minumum number of acceptable reads. Can start as a guess
+ggplot(ss.df, aes(x=treatment_sbr_sham, y = value, color=strain)) +
+  geom_point() +
+  scale_y_log10() +
+  labs(y="ASV")+
+  geom_hline(yintercept = y, lty = 2) +
+  facet_wrap(~days)
+
+
+```
+
+```{r sample-removal}
+
+#Remove water samples
+nsamples(ps0) #63
+levels(sample_data(ps0)$sample_name_external_id)
+ps0 <- subset_samples(ps0, sample_name_external_id!="water")
+levels(sample_data(ps0)$sample_name_external_id)
+ps0 #52
+
+##Remove samples with <1000 ASVs 
+nsamples(ps0) #52 samples
+ntaxa(ps0) #546
+ps1 <-prune_samples(sample_sums(ps0)>1000, ps0) #>1000 becuase I want to keep those with >1000 reads.  This may change depending on the sample set so you need to graph your data before pruning. This step removes one sample "244_Week 5" from the 'Week_5 129j sham' group to have 51 samples
+nsamples(ps1) #51 samples
+sample_sums(ps1)
+ntaxa(ps1) #546 taxa
+
+#this looks at samples again to confirm removal
+ss <- as_tibble(sample_sums(ps1))
+sd <- as_tibble(sample_data(ps1))
+ss.df <- as_tibble(merge (sd, ss, by = "row.names"))
+ss.df <- merge(sd, data.frame("ASV" = ss), by = "row.names")
+
+y = 1000  
+ggplot(ss.df, aes(x=treatment_sbr_sham, y = value, color=strain)) +
+  geom_point() +
+  scale_y_log10() +
+  labs(y="ASV")+
+  geom_hline(yintercept = y, lty = 2) +
+  facet_wrap(~days)
+
+# Remove taxa no longer part of the count table due to sample removal
+summary(taxa_sums(ps1))
+ps1 <- prune_taxa(taxa_sums(ps1) > 0, ps1)
+summary(taxa_sums(ps1))
+ntaxa(ps1) #394 taxa
+ps1 #394 taxa and 51 samples
+```
+
+*Taxon cleaning*
+The following R chunk removes taxa not-typically part of a bacterial microbiome analysis.
+
+```{r taxon-cleaning}
+# Some examples of taxa you may not want to include in your analysis
+get_taxa_unique(ps1, "Kingdom")
+get_taxa_unique(ps1, "Class")
+
+ps1 # Check the number of taxa prior to removal #394
+ps2 <- ps1 %>%
+  subset_taxa(
+    Kingdom == "Bacteria" &
+    Family  != "mitochondria" &
+    Class   != "Chloroplast" &
+    Phylum != "Cyanobacteria/Chloroplast"
+  )
+ps2 # Confirm that the taxa were removed. #363 taxa 
+get_taxa_unique(ps2, "Kingdom")
+get_taxa_unique(ps2, "Class")
+get_taxa_unique(ps2, "Phylum")
+
+```
+
+## Prevalance assessment
+
+```{r prevalence-assessment}
+# Prevalence estimation
+# Calculate feature prevalence across the data set
+prevdf <- apply(X = otu_table(ps2),MARGIN = ifelse(taxa_are_rows(ps2), yes = 1, no = 2),FUN = function(x){sum(x > 0)})
+
+# Add taxonomy and total read counts to prevdf
+prevdf <- data.frame(Prevalence = prevdf, TotalAbundance = taxa_sums(ps2), tax_table(ps2))
+
+#Prevalence plot
+prevdf1 <- subset(prevdf, Phylum %in% get_taxa_unique(ps2, "Phylum"))
+p.prevdf1 <- ggplot(prevdf1, aes(TotalAbundance, Prevalence / nsamples(ps2),color=Family)) +
+  geom_hline(yintercept = 0.05, alpha = 0.5, linetype = 2) +
+  geom_point(size = 1, alpha = 0.7) +
+  scale_x_log10() +
+  xlab("Total Abundance") + ylab("Prevalence [Frac. Samples]") +
+  facet_wrap(~Phylum) +
+  theme(legend.position="none") +
+  ggtitle("Phylum Prevalence in All Samples\nColored by Family")
+p.prevdf1  #This plot looks as expected and no filtering will be done in next steps
+
+```
+
+## Community composition plotting
+
+```{r community-composition-plots-alive-adapted}
+# Create a data table for ggplot with alive and adapted only 
+ps2 #363 taxa, 51 samples
+nsamples(ps2) #51
+levels(sample_data(ps2)$alive_dead) #alive dead
+levels(sample_data(ps2)$adapted) #na yes
+ps2.alive.adapted <- subset_samples(ps2, alive_dead == "alive" & adapted != "no")
+levels(sample_data(ps2.alive.adapted)$alive_dead)
+levels(sample_data(ps2.alive.adapted)$adapted)
+ps2.alive.adapted #363 taxa #49 samples
+
+# Remove taxa no longer part of the count table due to sample removal
+summary(taxa_sums(ps2.alive.adapted))
+ps3 <- prune_taxa(taxa_sums(ps2.alive.adapted) > 0, ps2.alive.adapted)
+summary(taxa_sums(ps3))
+ntaxa(ps3) #359 taxa
+ps3 #359 taxa and #49 samples
+
+ps3.phylum <- ps3 %>%
+  tax_glom(taxrank = "Phylum") %>%                     # agglomerate at phylum level
+  transform_sample_counts(function(x) {x/sum(x)} ) %>% # Transform to rel. abundance (or use ps0.ra)
+  psmelt()                                         # Melt to long format for easy ggploting
+
+# Plot - Phylum
+p.ps3.phylum <- ggplot(ps3.phylum, aes(x = sample_id, y = Abundance, fill = Phylum)) + 
+  geom_bar(stat = "identity", width = 1) +
+  facet_wrap(~treatment_sbr_sham~days, scales = "free_x", nrow = 2) +
+  theme(axis.text.x = element_blank()) +
+  theme(axis.title.x = element_blank()) +
+  labs(title = "Abundant Phylum (> 1%)")
+p.ps3.phylum
+
+p.ps3.phylum <- ggplot(ps3.phylum, aes(x = sample_id, y = Abundance, fill = Phylum)) + 
+  geom_bar(stat = "identity", width = 1) +
+  facet_grid(~treatment_sbr_sham~days, scales = "free_x") +
+  theme(axis.text.x = element_blank()) +
+  theme(axis.title.x = element_blank()) +
+  labs(title = "Abundant Phylum (> 1%)")
+p.ps3.phylum
+
+# You can rerun the first bit of code in this chunk and change Phylum to Species, Genus, etc.
+
+
+```
+
+
+```{r-relative-abundance-plotting-stools-alive-adapted-129j}
+##look at Proteobacteria, Bacteroidetes, Firmicutes, Verrucomicrobia, Tenericutes, Actinobacteria and Deferribacteres relative abundance in 129j comparing sbr vs sham
+
+ps3.ra <- transform_sample_counts(ps3, function(x) {x/sum(x)} )
+ps3.glom.phylum <- tax_glom(ps3.ra, taxrank = "Phylum")
+dat <- as.tibble(psmelt(ps3.glom.phylum))
+
+
+dat.proteobacteria <- dat %>%
+  filter(Phylum =="Proteobacteria") 
+
+dat.bacteroidetes <- dat %>%
+  filter(Phylum == "Bacteroidetes") 
+
+dat.firmicutes <- dat %>%
+  filter(Phylum == "Firmicutes")
+
+dat.actinobacteria <- dat %>%
+  filter(Phylum == "Actinobacteria")
+
+dat.deferribacteres <- dat %>%
+  filter(Phylum == "Deferribacteres")
+
+dat.tenericutes <- dat %>%
+  filter(Phylum == "Tenericutes")
+
+dat.verrucomicrobia <- dat %>%
+  filter(Phylum == "Verrucomicrobia")
+
+
+p.dat.proteobacteria <- ggboxplot(dat.proteobacteria, x = "treatment_sbr_sham", y = "Abundance", outlier.shape = NA, add = "jitter", color = "treatment_sbr_sham") +
+  facet_wrap(~days, ncol = 4) +
+  stat_compare_means(data=dat.proteobacteria, label = "p.signif") +
+  ylim(0,1.2) +
+  labs(title = "Proteobacteria", y = "Relative Abundance", x = "")+
+  theme(legend.position = "none")
+p.dat.proteobacteria
+
+
+p.dat.bacteroidetes <- ggboxplot(dat.bacteroidetes, x = "treatment_sbr_sham", y = "Abundance", outlier.shape = NA, add = "jitter", color = "treatment_sbr_sham") +
+  facet_wrap(~days, ncol = 4) +
+  stat_compare_means(data=dat.bacteroidetes, label = "p.signif") +
+  ylim(0,1.0) +
+  labs(title = "Bacteroidetes", y = "Relative Abundance", x="")+
+  theme(legend.position = "none")
+p.dat.bacteroidetes
+
+
+p.dat.firmicutes <- ggboxplot(dat.firmicutes, x = "treatment_sbr_sham", y = "Abundance", outlier.shape = NA, add = "jitter", color = "treatment_sbr_sham", legend = NULL) +
+  facet_wrap(~days, ncol = 4) +
+  stat_compare_means(data=dat.firmicutes, label = "p.signif") +
+  ylim(0,1.2) +
+  labs(title = "Firmicutes", y = "Relative Abundance")
+p.dat.firmicutes
+
+p.dat.actinobacteria <- ggboxplot(dat.actinobacteria, x = "treatment_sbr_sham", y = "Abundance", outlier.shape = NA, add = "jitter", color = "treatment_sbr_sham", legend = NULL) +
+  facet_wrap(~days, ncol = 4) +
+  stat_compare_means(data=dat.actinobacteria, label = "p.signif") +
+  ylim(0,1.2) +
+  labs(title = "Actinobacteria", y = "Relative Abundance")
+p.dat.actinobacteria
+
+p.dat.deferribacteres <- ggboxplot(dat.deferribacteres, x = "treatment_sbr_sham", y = "Abundance", outlier.shape = NA, add = "jitter", color = "treatment_sbr_sham", legend = NULL) +
+  facet_wrap(~days, ncol = 4) +
+  stat_compare_means(data=dat.deferribacteres, label = "p.signif") +
+  ylim(0,1.2) +
+  labs(title = "Deferribacteres", y = "Relative Abundance")
+p.dat.deferribacteres
+
+p.dat.tenericutes <- ggboxplot(dat.tenericutes, x = "treatment_sbr_sham", y = "Abundance", outlier.shape = NA, add = "jitter", color = "treatment_sbr_sham", legend = NULL) +
+  facet_wrap(~days, ncol = 4) +
+  stat_compare_means(data=dat.tenericutes, label = "p.signif") +
+  ylim(0,1.2) +
+  labs(title = "Tenericutes", y = "Relative Abundance")
+p.dat.tenericutes
+
+p.dat.verrucomicrobia <- ggboxplot(dat.verrucomicrobia, x = "treatment_sbr_sham", y = "Abundance", outlier.shape = NA, add = "jitter", color = "treatment_sbr_sham", legend = NULL) +
+  facet_wrap(~days, ncol = 4) +
+  stat_compare_means(data=dat.verrucomicrobia, label = "p.signif") +
+  ylim(0,1.0) +
+  labs(title = "Verrucomicrobia", y = "Relative Abundance", x="")+
+  theme(legend.position = "none")
+p.dat.verrucomicrobia
+
+ggplot(dat.bacteroidetes, aes(x = days, y = Abundance, color = treatment_sbr_sham, group = treatment_sbr_sham)) +
+  geom_point() +
+  facet_wrap(~Phylum)+
+  geom_jitter(width = 0.1)+
+  geom_smooth()+
+  ylim(0,0.8)+
+  theme(legend.position = "none")+
+  labs(y = "Relative Abundance", x = "days")
+
+ggplot(dat.verrucomicrobia, aes(x = days, y = Abundance, color = treatment_sbr_sham, group = treatment_sbr_sham)) +
+  geom_point() +
+  facet_wrap(~Phylum)+
+  geom_jitter(width = 0.1)+
+  geom_smooth()+
+  ylim(0,0.8)+
+  theme(legend.position = "none")+
+  labs(y = "Relative Abundance", x = "days")
+
+
+ggplot(dat.firmicutes, aes(x = days, y = Abundance, color = treatment_sbr_sham, group = treatment_sbr_sham)) +
+  geom_point() +
+  facet_wrap(~Phylum)+
+  geom_smooth(show.legend = FALSE)
+
+ggplot(dat.proteobacteria, aes(x = days, y = Abundance, color = treatment_sbr_sham, group = treatment_sbr_sham)) +
+  geom_point() +
+  facet_wrap(~Phylum)+
+  geom_smooth(show.legend = FALSE)
+
+ggplot(dat.deferribacteres, aes(x = days, y = Abundance, color = treatment_sbr_sham, group = treatment_sbr_sham)) +
+  geom_point() +
+  facet_wrap(~Phylum)+
+  geom_smooth(show.legend = FALSE)
+
+ggplot(dat.tenericutes, aes(x = days, y = Abundance, color = treatment_sbr_sham, group = treatment_sbr_sham)) +
+  geom_point() +
+  facet_wrap(~Phylum)+
+  geom_smooth(show.legend = FALSE)
+
+ggplot(dat.actinobacteria, aes(x = days, y = Abundance, color = treatment_sbr_sham, group = treatment_sbr_sham)) +
+  geom_point() +
+  geom_jitter()+
+  facet_wrap(~Phylum)+
+  geom_smooth(show.legend = FALSE)
+
+ggplot(dat.bacteroidetes, aes(x = days, y = Abundance, color = treatment_sbr_sham, group = treatment_sbr_sham)) +
+  geom_point() +
+  facet_wrap(~Phylum)+
+  geom_smooth(show.legend = FALSE)
+
+ggplot(dat.verrucomicrobia, aes(x = days, y = Abundance, color = treatment_sbr_sham, group = treatment_sbr_sham)) +
+  geom_point() +
+  facet_wrap(~Phylum)+
+  geom_smooth(show.legend = FALSE)
+
+```
+
+## Alpha diversity plotting
+
+Alpha diversity is a standard tool researchers can use to calculate the number of bacterial taxa present in a study or study group and the relationships between relative abundance and how evenly taxa are distributed. These are classic representations of species number and diversity in a study which provide useful summary information about the numbers and relative abundances of bacterial taxa within your study.
+
+Similar to the plot above, we can calculate several measures of alpha diversity, add them to a data frame and use ggplot2 to follow the alpha diversity trajectory over time.
+
+## Alpha diversity plotting final for ps3 (alive, adapted, stool, 129j)
+
+```{r alpha-diverstiy-plots-alive-adapted-129j}
+##Alpha diversity to look at stools,alive,adapted only 
+alpha.div <- estimate_richness(ps3, measures = c("Observed", "Shannon"))
+sd.3 <- as.data.frame(sample_data(ps3)) 
+ps3.rich <- cbind(sd.3, alpha.div) # Bind alpha diversity columns to sample data
+
+# Richness_treatments
+p.rich<- ggplot(ps3.rich, aes(x = treatment_sbr_sham, y = Observed, color = treatment_sbr_sham, outlier = NA)) +
+  geom_boxplot() +
+  labs(y = "Richness", color = "Treatment", x = "") +
+  ylim(0,130) +
+  geom_jitter(size = 2, alpha = 0.5, width = 0.2) +
+  theme(panel.grid = element_blank()) +
+  facet_grid(~days)
+p.rich
+p.rich + stat_compare_means(data = ps3.rich, label = "p.format")
+
+# Shannon diversity
+p.sd <- ggplot(ps3.rich, aes(x = treatment_sbr_sham, y = Shannon, color = treatment_sbr_sham, outlier = NA)) +
+  geom_boxplot() +
+  labs(y = "Shannon", color = "Treatment", x = "") +
+  ylim(0,4.5) +
+  geom_jitter(size = 2, alpha = 0.5, width = 0.2) +
+  theme(panel.grid = element_blank()) +
+  facet_grid(~days)
+p.sd
+p.sd + stat_compare_means(data = ps3.rich, label = "p.format")
+
+# Note: ggarrange enalbes you to directly add labels to plot grids
+ggarrange(p.rich + stat_compare_means(data = ps3.rich, label = "p.format"), p.sd + stat_compare_means(data = ps3.rich, label = "p.format"), ncol = 2, labels = c("A)", "B)"), common.legend = TRUE, legend = c("right")) 
+
+
+```
+
+
+## Ordination
+
+Beta diversity enables you to view overall relationships between samples. These relationships are calculated using a distance metric calculation (of which there are many) and these multi-dimensional relationships are evaluated and viewed in the two dimensions which explain the majority of their variance. Additional dimensions can be explored to evaluate how samples are related to one another.
+
+The UniFrac distance metric takes advantage of the phylogenetic relationships between bacterial taxa by down-weighting relationships between bacterial taxa that are phylogenetically related versus ones that are distantly related. Weighted UniFrac builds on this by also taking into account the relative abundances of each taxa. For a more detailed discussion on these distance calculations see: https://en.wikipedia.org/wiki/UniFrac. Ultimately, the decision on what distance metric to use should be a result of experimentation and a good understanding of the underlying properties of your data.
+
+The following R chunks calculate UniFrac and wUniFrac on a PhyloSeq object and display the the two components of these results that explain a majority of the variance in the data using Principle Coordinates Analysis (PCoA). For a detailed explanation of how PCoA works see: https://sites.google.com/site/mb3gustame/dissimilarity-based-methods/principal-coordinates-analysis.
+
+```{r ordination}
+##stools, alive, adapted 129j only #ps3)
+#Ordination Analysis with weighted unifrac
+
+ord.pcoa.wuni <- ordinate(ps3, method = "PCoA", distance = "wunifrac")
+
+
+
+```
+
+And now to plot each ordination.
+
+```{r ordination-plots}
+## Ordination plots stools, alive, adapted, 129j only
+
+# Weighted Unifrac
+p.pcoa.wuni <- plot_ordination(ps3, ord.pcoa.wuni, color = "treatment_sbr_sham", axes = c(1,2)) +
+  geom_point(size = 2) +
+  geom_hline(yintercept = 0, lty=2, color= "grey")+
+  geom_vline(xintercept = 0, lty=2, color= "grey")+
+  labs(title = "PCoA of wUniFrac Distances", color = "Treatment") +
+  ylim(-0.2,0.4) +
+  theme(panel.grid = element_blank()) +
+  facet_grid(~days)
+p.pcoa.wuni
+
+
+ggarrange(p.pcoa.wuni, nrow = 1, labels = c("C)"))
+
+```
+
+## Group significance testing with ADONIS
+
+```{r adonis-script}
+# Set a random seed so that exact results can be reproduced
+set.seed(10000)
+
+# Function to run adonis test on a physeq object and a variable from metadata 
+
+  # Weighted unifrac
+doadonis.w <- function(physeq, category) {
+  bdist.w <- phyloseq::distance(physeq, "wunifrac")
+  col.w <- as(sample_data(physeq), "data.frame")[ ,category]
+  
+  # Adonis test
+  adonis.bdist.w <- adonis(bdist.w ~ col.w)
+  print("Adonis results (Weighted Unifrac):")
+  print(adonis.bdist.w)
+  
+}
+
+# Let's subset by day and recalculate
+ps3 #359 taxa 49 samples
+
+
+# Let's subset only the day 3 data and recalculate
+ps3.day.3 <- subset_samples(ps3, days == "Day 3")
+ps3.day.3 #359 taxa 11 samples
+ps3.day.7 <- subset_samples(ps3, days == "Day 7")
+ps3.day.7 #359 taxa 13 samples
+ps3.day.35 <- subset_samples(ps3, days == "Day 35")
+ps3.day.35 #359 taxa 12 samples
+ps3.day.70 <- subset_samples(ps3, days == "Day 70")
+ps3.day.70 #359 taxa 13 samples
+
+
+doadonis.w(ps3.day.3, "treatment_sbr_sham")
+doadonis.w(ps3.day.7, "treatment_sbr_sham")
+doadonis.w(ps3.day.35, "treatment_sbr_sham")
+doadonis.w(ps3.day.70, "treatment_sbr_sham")
+
+
+```
+
+
+## Differential abundance testing
+
+There are a number of ways to detect bacterial taxa (more accurately, ASVs) differentially abundant between one or more groups or along an environmental gradient (e.g. random forest, LEfSe, ANCOM, many others)
+
+Links to other methods to detect differentially abundant taxa:
+
+Random Forest in R example: https://rpubs.com/michberr/randomforestmicrobe
+LEfSe: https://bitbucket.org/biobakery/biobakery/wiki/lefse
+ANCOM: https://www.ncbi.nlm.nih.gov/pubmed/26028277
+
+DESeq2 provides a powerful statistical model for evaluating count tables generated with sequence data. The DESEq2 library normalizes count data and performs model-based calculations to determine features (in the case of microbiome data, ASVs) that are associated with one state or another.
+
+
+The chunk below will determine all taxa differentially abundant at at least one time point.
+
+
+```{r differential-abundance-testing-stool.alive.adapted-129j-LRT}
+
+#### This section is for ps3 
+# Test for taxa which at one or more time points after time 0 showed a treatment-specific effect
+# Convert phyloseq object to DESeq2 table
+
+ds.ps3.LRT <- phyloseq_to_deseq2(ps3, ~treatment_sbr_sham + days + treatment_sbr_sham:days)
+
+# Run DESeq2
+dds.ps3.LRT <- DESeq(ds.ps3.LRT, test="LRT", reduced = ~treatment_sbr_sham + days, sfType="poscounts")
+
+
+# Tabulate results
+res.dds.ps3.LRT <- results(dds.ps3.LRT)
+res.dds.ps3.LRT$symbol <- mcols(dds.ps3.LRT)$symbol
+summary(res.dds.ps3.LRT)
+mcols(res.dds.ps3.LRT)
+write.table(res.dds.ps3.LRT, file = "~/Desktop/Jocelyn/results/deseq_ps3_sbr_v_sham_LRT.txt", sep = "\t")
+
+#Get significant results <0.05
+nrow(res.dds.ps3.LRT) #359
+df.ps3.res <- as.data.frame(res.dds.ps3.LRT[ which(res.dds.ps3.LRT$padj < 0.05), ])
+nrow(df.ps3.res) #1 
+df.ps3.res <- rownames_to_column(df.ps3.res, var = "ASV")
+write.table(df.ps3.res, file = "~/Desktop/Jocelyn/results/df_deseq2_ps3_results.txt", sep = "\t")
+
+
+# Create appropriately formatted taxa table
+# RDP
+tax.table.ps3 <- as.data.frame(tax_table(ps3))
+tax.table.ps3<-  as_tibble(rownames_to_column(tax.table.ps3, var = "ASV"))
+tax.table.ps3 <- mutate(tax.table.ps3, ASV_number=(paste0("ASV_",row_number())))
+rownames(tax.table.ps3)<- tax.table.ps3$ASV
+tax.table.ps3 <-as.matrix(tax.table.ps3)
+ps3.tax <- phyloseq(otu_table(ps3, taxa_are_rows = TRUE), tax_table(tax.table.ps3), sample_data(ps3), phy_tree(ps3))
+tax.table.ps3 <- as.data.frame(tax.table.ps3); tax.table.ps3$ASV <- as.character(tax.table.ps3$ASV) # needed for rlog 
+colnames(tax.table.ps3)
+
+
+df.ps3.rdp <- left_join(df.ps3.res, tax.table.ps3, by = "ASV")
+colnames(df.ps3.rdp)
+
+# Table of results: 
+write.table(df.ps3.rdp, file = "~/Desktop/Jocelyn/results/df.ps3.LRT.results.txt", sep = "\t", row.names = FALSE)
+
+
+#Volcano plots
+volcano.ps3.LRT <- ggplot(df.ps3.rdp, aes(x=log2FoldChange, y = -log10(padj), color = Phylum)) +
+  geom_point(size = 2.5) +
+  geom_vline(xintercept = 0, lty = 2) +
+  geom_text(mapping = aes(label = paste(Genus, Species)), size = 4, nudge_y = 0.1, nudge_x = -0.5) +
+  geom_hline(yintercept = -log10(0.05), lty=2) +
+  theme(legend.position = "right") 
+volcano.ps3.LRT
+
+```
+
+```{r ground-truth-plots-prep-129j-alive-adapted-LRT}
+##Ground truth plots
+replace_counts = function(physeq, dds) {
+  dds_counts = counts(dds, normalized = TRUE)
+  if (!identical(taxa_names(physeq), rownames(dds_counts))) {
+    stop("OTU ids don't match")
+  }
+  otu_table(physeq) = otu_table(dds_counts, taxa_are_rows = TRUE)
+  return(physeq)
+}
+
+
+# Make deseq ready object for whole dataset
+ds.all <- phyloseq_to_deseq2(ps3, ~treatment_sbr_sham) 
+
+##ds.stool.all <- estimateSizeFactors(ds.stool.all, geoMeans = geoMeans.stool.all)
+
+dds.all <- DESeq(ds.all)
+rlog.all <- replace_counts(ps3, dds.all)
+rlog.all <- psmelt(rlog.all)
+rlog.all <- rename(rlog.all, "OTU" = "ASV")
+colnames(rlog.all)
+rlog.all.rdp <- inner_join(df.ps3.rdp, rlog.all, by = "ASV")
+table(sample_data(rlog.all.rdp)$strain) #129j  49 
+
+
+ggplot(rlog.all.rdp, aes(x = days, y = Abundance, color = treatment_sbr_sham, group = treatment_sbr_sham)) +
+  geom_point() +
+  geom_smooth() +
+  facet_wrap(~ASV_number) +
+  labs(color = "Treatment", x = "") +
+  scale_y_log10()
+
+ggplot(subset(rlog.all.rdp, ASV_number == "ASV_23"), aes(x = days, y = Abundance, color = treatment_sbr_sham, group = treatment_sbr_sham)) +
+  geom_point() +
+  geom_smooth() +
+  facet_wrap(ASV_number~Family.x~Genus.x) +
+  scale_y_log10()+
+  labs(color = "Treatment", x = "") +
+  theme(panel.grid = element_blank()) 
+
+
+```
+
+
